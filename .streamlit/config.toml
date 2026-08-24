@@ -1,0 +1,30 @@
+# ── Streamlit production configuration ───────────────────────────────────────
+
+[browser]
+# Suppress browser auto-open on startup
+gatherUsageStats = false
+
+[server]
+# Use "watchdog" instead of the default module-path scanner.
+# The default watcher ("auto") introspects every imported module's __path__,
+# which triggers lazy transformers imports that fail on torchvision — producing
+# thousands of noisy "ModuleNotFoundError: No module named 'torchvision'" lines.
+# "watchdog" uses filesystem events instead, avoiding module introspection entirely.
+fileWatcherType = "watchdog"
+
+# Silence the Streamlit watcher's module-path examination logs
+# (only the actual app logs remain visible)
+runOnSave = true
+headless = true
+
+[logger]
+# Only show WARNING and above from Streamlit internals; app logs are unaffected
+level = "warning"
+# Silence the noisy watcher traceback output specifically
+messageFormat = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+[client]
+# Hide raw Python tracebacks from end users on Streamlit Cloud.
+# run_analysis() in app.py still shows stack traces inside a controlled expander.
+showErrorDetails = false
+

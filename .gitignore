@@ -1,6 +1,23 @@
+# Secrets — never commit
 .env
+.streamlit/secrets.toml
+
+# Virtual environments
 .venv/
+venv/
+
+# Python bytecode
 __pycache__/
 *.pyc
+*.pyo
+
+# Runtime data (ChromaDB, logs, generated files)
+data/
 logs/
+*.log
 chroma_db/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp

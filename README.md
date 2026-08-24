@@ -30,6 +30,7 @@ know the agent isn't just hardcoded" in an interview.
 | Component | Best case | Fallback (when it triggers) |
 |---|---|---|
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (real semantic vectors) | TF-IDF + TruncatedSVD, local, no network — triggers if HuggingFace is unreachable |
+| Resume storage | Parsed resume **text** is temporarily indexed in ChromaDB (local vector DB) for job matching. Raw PDF bytes are discarded immediately after parsing. The index is ephemeral on Streamlit Cloud (lost when the container restarts). | — |
 | Job search | Live results via JSearch (RapidAPI) | Static 8-job demo pool, ranked by keyword overlap with your query — triggers with no `RAPIDAPI_KEY` |
 | LLM reasoning (Deterministic mode) | Anthropic Claude or HF Inference generates the summary/roadmap text | Rule-based string templates — triggers with no API key |
 | LLM reasoning (Smolagents mode) | Real ToolCallingAgent loop | **None** — raises `SmolagentUnavailableError` if no key |
@@ -56,6 +57,41 @@ exactly what your own system is doing.
   Resumes with unconventional formatting (no clear section headers, heavy
   use of tables/columns) will parse poorly. Check the extracted skills/projects
   in the Skills tab before trusting the downstream analysis.
+
+## Streamlit Cloud Deployment
+
+```
+Repository root for deployment:  career_agent/
+Main file:                        app.py
+Python version:                   3.11
+```
+
+**Steps:**
+1. Push the `career_agent/` directory as the root of your GitHub repo (or point
+   Streamlit Cloud to the `career_agent/` subfolder using the "App file" setting).
+2. In the Streamlit Cloud dashboard: **Settings → Secrets**, add:
+   ```toml
+   ANTHROPIC_API_KEY = "sk-ant-..."
+   RAPIDAPI_KEY      = "your_rapidapi_key"
+   HF_TOKEN          = "hf_..."
+   ```
+   All three are **optional** — the app degrades gracefully without each one
+   (see the table above for what falls back).
+3. Deploy. No additional build commands needed — `requirements.txt` is at the
+   repo root and is picked up automatically.
+
+**Secrets the app reads (exact names):**
+
+| Secret name | Required? | Used by |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Optional (recommended) | `rag_chain.py` — LLM career summary & roadmap |
+| `RAPIDAPI_KEY` | Optional | `job_search.py` — live JSearch job results |
+| `HF_TOKEN` | Optional | `rag_chain.py` — HF Inference fallback LLM |
+
+**ChromaDB on Cloud:** The vector index is written to `/tmp/chroma_db` on Cloud
+(ephemeral — reset on each container start). This is intentional: resume data
+should not persist across sessions. Job matching still works correctly within
+a single session.
 
 ## Setup
 

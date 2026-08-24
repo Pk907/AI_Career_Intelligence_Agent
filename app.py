@@ -12,6 +12,20 @@ import os
 import time
 import streamlit as st
 
+# ── Streamlit Cloud secrets → environment variables bridge ────────────────────
+# On Streamlit Cloud, API keys live in st.secrets (Settings → Secrets).
+# On local dev, they come from .env via python-dotenv (loaded in config.py).
+# This block copies st.secrets into os.environ BEFORE any module import reads
+# os.getenv(), so all existing os.getenv() calls work identically in both envs.
+# Local .env takes precedence: we only write keys that are not already set.
+try:
+    for _secret_key, _secret_val in st.secrets.items():
+        if isinstance(_secret_val, str) and _secret_key not in os.environ:
+            os.environ[_secret_key] = _secret_val
+except Exception:
+    # st.secrets is unavailable locally without a secrets.toml — safe to ignore.
+    pass
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Career Intelligence Agent",
@@ -567,7 +581,11 @@ def render_form() -> dict:
             uploaded = st.file_uploader(
                 "📄  Resume PDF",
                 type=["pdf"],
-                help="Your file is processed locally and never stored",
+                help=(
+                    "Raw PDF bytes are not persisted. Parsed resume text is "
+                    "temporarily indexed in a local vector store for job matching "
+                    "and is cleared when the session ends."
+                ),
             )
             st.markdown('<div style="height:4px"></div>', unsafe_allow_html=True)
 
@@ -614,15 +632,37 @@ def render_form() -> dict:
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
 
+_STEP_ICONS = {1: "📄", 2: "🔍", 3: "🎯", 4: "📊", 5: "🗺️", 6: "✨"}
+_STEP_TIPS  = {
+    1: "Parsing your resume PDF…",
+    2: "Fetching fresh job listings — may take ~15s…",
+    3: "Calculating match scores…",
+    4: "Identifying skill gaps…",
+    5: "Building your learning roadmap…",
+    6: "Generating career summary…",
+}
+
+
 def run_analysis(controls: dict) -> dict | None:
     file_bytes = io.BytesIO(controls["uploaded"].read())
-    progress = st.progress(0)
-    status   = st.empty()
+    progress  = st.progress(0)
+    status    = st.empty()
+    tip_box   = st.empty()
+    start_ts  = time.time()
 
     def on_progress(step: int, label: str) -> None:
-        progress.progress(step / 6)
+        elapsed = int(time.time() - start_ts)
+        icon    = _STEP_ICONS.get(step, "⚙️")
+        tip     = _STEP_TIPS.get(step, "")
+        frac    = step / 6
+        progress.progress(frac)
         status.markdown(
-            f'<div class="cia-progress-step">Step {step} / 6 — {_e(label)}</div>',
+            f'<div class="cia-progress-step">{icon} &nbsp;Step {step}/6 — {_e(label)}'
+            f'<span style="color:#94A3B8;font-size:12px;margin-left:10px">{elapsed}s</span></div>',
+            unsafe_allow_html=True,
+        )
+        tip_box.markdown(
+            f'<div style="font-size:13px;color:#64748B;padding:4px 0 2px">{tip}</div>',
             unsafe_allow_html=True,
         )
 
@@ -635,19 +675,22 @@ def run_analysis(controls: dict) -> dict | None:
             timeline_weeks=controls["timeline"],
             progress_callback=on_progress,
         )
+        elapsed = int(time.time() - start_ts)
         progress.progress(1.0)
         status.markdown(
-            '<div class="cia-progress-step" style="color:#10B981">'
-            '✓ Analysis complete!</div>',
+            f'<div class="cia-progress-step" style="color:#10B981">'
+            f'✓ Analysis complete in {elapsed}s!</div>',
             unsafe_allow_html=True,
         )
-        time.sleep(0.5)
+        tip_box.empty()
+        time.sleep(0.8)
         progress.empty()
         status.empty()
         return result
     except Exception as exc:
         progress.empty()
         status.empty()
+        tip_box.empty()
         st.error(f"Analysis failed: {exc}")
         import traceback
         with st.expander("Error details"):
@@ -706,7 +749,16 @@ def render_overview(result: dict) -> None:
 
 def render_resume_insights(result: dict) -> None:
     resume     = result.get("resume", {})
-    experience = _e(resume.get("experience", "") or "Not extracted from resume")
+    yrs        = resume.get("years_experience", 0)
+    is_fresher = resume.get("is_fresher", yrs == 0)
+
+    if is_fresher:
+        exp_display = "Fresher / 0 years professional experience"
+    else:
+        exp_text = (resume.get("experience", "") or "").strip()
+        exp_display = exp_text or f"{yrs:.0f} years"
+
+    experience = _e(exp_display)
     education  = _e(resume.get("education",  "") or "Not found in resume")
 
     st.markdown(f"""
@@ -727,34 +779,137 @@ def render_resume_insights(result: dict) -> None:
 
 
 def render_skills(result: dict) -> None:
-    resume = result.get("resume", {})
-    skills = resume.get("skills", [])
-    tags   = _tags(skills, "t-blue") if skills else (
-        '<span style="font-size:14px;color:#94A3B8">No skills detected — '
-        'try a more detailed resume.</span>'
-    )
+    resume       = result.get("resume", {})
+    skills       = resume.get("skills", [])
+    skill_groups = resume.get("skill_groups", {})
+
+    if not skills:
+        st.markdown(f"""
+<div id="skills" class="cia-section">
+  {_sh("🔧", "Skills Analysis", "No skills detected")}
+  <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:20px 24px;color:#94A3B8;font-size:14px">
+    No recognizable technical skills were detected. Try uploading a more detailed resume.
+  </div>
+</div>
+""", unsafe_allow_html=True)
+        return
+
+    # Build grouped skill display
+    cat_colors = {
+        "Programming":  "t-blue",
+        "AI/ML":        "t-yellow",
+        "Libraries":    "t-blue",
+        "Frameworks":   "t-green",
+        "Databases":    "t-red",
+        "Cloud/DevOps": "t-blue",
+        "Tools":        "t-green",
+        "Other":        "t-blue",
+    }
+
+    if skill_groups:
+        groups_html = ""
+        for cat, cat_skills in skill_groups.items():
+            if not cat_skills:
+                continue
+            chip_cls = cat_colors.get(cat, "t-blue")
+            chips = _tags(cat_skills, chip_cls)
+            groups_html += f"""
+<div style="margin-bottom:18px">
+  <div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;
+              letter-spacing:.7px;margin-bottom:8px">{_e(cat)}</div>
+  <div style="display:flex;flex-wrap:wrap;gap:4px">{chips}</div>
+</div>"""
+        skills_content = groups_html
+    else:
+        # Flat fallback
+        skills_content = f'<div style="display:flex;flex-wrap:wrap;gap:4px">{_tags(skills, "t-blue")}</div>'
 
     st.markdown(f"""
 <div id="skills" class="cia-section">
-  {_sh("🔧", "Skills Analysis", f"{len(skills)} skills detected in your resume")}
-  <div style="background:var(--bg);border:1px solid var(--border);
-              border-radius:var(--r);padding:20px 24px">
-    {tags}
+  {_sh("🔧", "Skills Analysis", f"{len(skills)} technical skills detected across {len(skill_groups)} categories")}
+  <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:20px 24px">
+    {skills_content}
   </div>
 </div>
 """, unsafe_allow_html=True)
 
 
-def render_jobs(result: dict) -> None:
-    jobs = result.get("matched_jobs", [])
+def _format_posted(posted_at: str) -> str:
+    """Return a human-readable 'posted X ago' string."""
+    if not posted_at:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(posted_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        delta = now - dt
+        days = delta.days
+        if days == 0:
+            return "Posted today"
+        if days == 1:
+            return "Posted yesterday"
+        if days < 7:
+            return f"Posted {days}d ago"
+        if days < 30:
+            return f"Posted {days // 7}w ago"
+        return f"Posted {days // 30}mo ago"
+    except Exception:
+        return ""
 
+
+def render_jobs(result: dict) -> None:
+    jobs    = result.get("matched_jobs", [])
+    backend = result.get("job_search_backend", "")
+    error   = result.get("job_search_error", "")
+    is_live = backend == "rapidapi-jsearch"
+
+    # ── No jobs: show honest reason ───────────────────────────────────────────
     if not jobs:
+        if backend == "no-key":
+            msg = (
+                '⚠️ &nbsp;<strong>Live job search unavailable</strong> — '
+                '<code>RAPIDAPI_KEY</code> is not set in your <code>.env</code> file. '
+                'Add a free key from <a href="https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch" '
+                'target="_blank">RapidAPI JSearch</a> to enable live results.'
+            )
+            banner_style = "background:#FEF3C7;border:1px solid #FCD34D;color:#92400e"
+        elif backend in ("api-error", "unavailable"):
+            msg = (
+                f'⚠️ &nbsp;<strong>Job search failed</strong> — API returned an error'
+                + (f': <code>{_e(error)}</code>' if error else ".")
+                + ' Check your RapidAPI key quota or try again later.'
+            )
+            banner_style = "background:#FEE2E2;border:1px solid #FCA5A5;color:#991b1b"
+        else:
+            msg = '⚠️ &nbsp;No matching jobs found for this role and location. Try different keywords.'
+            banner_style = "background:#FEF3C7;border:1px solid #FCD34D;color:#92400e"
+
         st.markdown(f"""
 <div id="jobs" class="cia-section-alt">
-  {_sh("💼", "Job Matches", "No jobs found — try a different role or location")}
+  {_sh("💼", "Job Matches", "Live job search results")}
+  <div style="{banner_style};border-radius:8px;padding:14px 18px;font-size:14px;line-height:1.65">
+    {msg}
+  </div>
 </div>
 """, unsafe_allow_html=True)
         return
+
+    # Backend notice banner
+    if is_live:
+        backend_banner = (
+            '<div style="background:#D1FAE5;border:1px solid #A7F3D0;border-radius:8px;'
+            'padding:10px 16px;margin-bottom:20px;font-size:13px;color:#065f46;font-weight:500">'
+            '🟢 &nbsp;Live results — real jobs fetched from JSearch / RapidAPI'
+            '</div>'
+        )
+    else:
+        backend_banner = (
+            '<div style="background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;'
+            'padding:10px 16px;margin-bottom:20px;font-size:13px;color:#92400e;font-weight:500">'
+            '⚠️ &nbsp;Demo mode — add <code>RAPIDAPI_KEY</code> to <code>.env</code> for live results. '
+            'Apply links below open LinkedIn job searches.'
+            '</div>'
+        )
 
     cards_html = ""
     for job in jobs:
@@ -763,34 +918,70 @@ def render_jobs(result: dict) -> None:
         color     = _score_color(score)
         pct       = min(100, int(score * 100))
 
-        title     = _e(job.get("title", ""))
-        company   = _e(job.get("company", ""))
-        loc_txt   = _e(job.get("location", ""))
-        salary    = _e(job.get("salary", ""))
-        source    = _e(job.get("source", ""))
-        url       = job.get("url", "#")
+        title       = _e(job.get("title", ""))
+        company     = _e(job.get("company", ""))
+        loc_txt     = _e(job.get("location", ""))
+        salary      = _e(job.get("salary", ""))
+        source      = job.get("source", "")
+        url         = job.get("url", "") or ""
+        linkedin_url = job.get("linkedin_url", "") or ""
+        posted_at   = job.get("posted_at", "") or ""
+        emp_type    = _e(job.get("employment_type", "") or "")
+        is_remote   = job.get("is_remote", False)
 
-        meta_parts  = [p for p in [loc_txt, salary] if p]
-        meta_html   = " &nbsp;·&nbsp; ".join(meta_parts)
+        posted_label = _format_posted(posted_at)
+        remote_badge = (
+            '<span style="background:#EEF2FF;color:#4F46E5;border:1px solid #C7D2FE;'
+            'border-radius:20px;padding:2px 9px;font-size:11px;font-weight:600;margin-left:6px">'
+            '🌐 Remote</span>'
+        ) if is_remote else ""
 
-        matched_tags = _tags(job.get("matched_skills", [])[:6], "t-green")
-        missing_tags = _tags(job.get("missing_skills", [])[:6], "t-red")
+        # Source badge — green for live, yellow for demo
+        is_live_job = "Live" in source or "JSearch" in source
+        src_color = ("#D1FAE5", "#065f46", "#A7F3D0") if is_live_job else ("#FEF3C7", "#92400e", "#FCD34D")
+        src_dot   = "🟢" if is_live_job else "🟡"
+        source_badge = (
+            f'<span style="background:{src_color[0]};color:{src_color[1]};border:1px solid {src_color[2]};'
+            f'border-radius:20px;padding:2px 9px;font-size:11px;font-weight:600">'
+            f'{src_dot} {_e(source)}</span>'
+        )
+
+        meta_parts = [p for p in [loc_txt, salary, emp_type] if p]
+        meta_html  = " &nbsp;·&nbsp; ".join(meta_parts)
+        if posted_label:
+            meta_html += f' &nbsp;·&nbsp; <span style="color:#10B981;font-weight:500">{_e(posted_label)}</span>'
+
+        matched_tags  = _tags(job.get("matched_skills", [])[:6], "t-green")
+        missing_tags  = _tags(job.get("missing_skills", [])[:6], "t-red")
         matched_block = matched_tags or '<span style="font-size:13px;color:#94A3B8">None detected</span>'
         missing_block = missing_tags or '<span style="font-size:13px;color:#10B981;font-weight:500">✓ No major gaps</span>'
 
-        via_html = f'<span style="font-size:12px;color:#94A3B8">via {source}</span>' if source else ""
+        # Primary apply button — uses direct ATS link or LinkedIn search
+        apply_label = "→ Apply Directly" if (url and "linkedin.com" not in url) else "→ Search on LinkedIn"
+        apply_btn = f'<a class="cia-apply" href="{url}" target="_blank" rel="noopener noreferrer">{apply_label}</a>' if url else ""
+
+        # Secondary: always show a LinkedIn search link
+        li_label = "🔗 LinkedIn Jobs"
+        li_btn = (
+            f'<a href="{linkedin_url}" target="_blank" rel="noopener noreferrer" '
+            f'style="font-size:13px;font-weight:600;color:#0077B5;text-decoration:none;'
+            f'padding:7px 14px;border:1.5px solid #0077B5;border-radius:6px;transition:all .15s">'
+            f'{li_label}</a>'
+        ) if linkedin_url else ""
 
         cards_html += f"""
 <div class="cia-job">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px">
-    <div style="flex:1;min-width:0">
-      <div class="cia-job-t">{title}<span class="cia-badge {_badge_cls(tier)}">{tier}</span></div>
-      <div class="cia-job-c">{company}</div>
-      <div class="cia-job-m">{meta_html}</div>
+    <div style="flex:1;min-width:0;overflow:hidden">
+      <div class="cia-job-t" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{title}<span class="cia-badge {_badge_cls(tier)}">{tier}</span>{remote_badge}</div>
+      <div class="cia-job-c" style="margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{company}</div>
+      <div class="cia-job-m" style="margin-top:4px">{meta_html}</div>
+      <div style="margin-top:6px">{source_badge}</div>
     </div>
-    <div style="text-align:right;flex-shrink:0">
-      <div style="font-size:28px;font-weight:800;color:{color};line-height:1">{score:.0%}</div>
+    <div style="text-align:right;flex-shrink:0;min-width:64px">
+      <div style="font-size:26px;font-weight:800;color:{color};line-height:1">{score:.0%}</div>
       <div style="font-size:11px;color:#94A3B8;margin-top:2px">match score</div>
+      <div style="font-size:10px;color:#CBD5E1;margin-top:2px" title="{_e(str(job.get('score_breakdown',{})))}">ⓘ hybrid</div>
     </div>
   </div>
   <div class="bar-bg"><div class="bar" style="width:{pct}%;background:linear-gradient(90deg,{color}77,{color})"></div></div>
@@ -802,15 +993,16 @@ def render_jobs(result: dict) -> None:
     <div style="font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">Skill Gaps</div>
     {missing_block}
   </div>
-  <div style="margin-top:14px;display:flex;gap:12px;align-items:center">
-    <a class="cia-apply" href="{url}" target="_blank">&#8594; Apply Now</a>
-    {via_html}
+  <div style="margin-top:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    {apply_btn}
+    {li_btn}
   </div>
 </div>"""
 
     st.markdown(f"""
 <div id="jobs" class="cia-section-alt">
   {_sh("💼", "Job Matches", f"{len(jobs)} positions matched to your profile")}
+  {backend_banner}
   {cards_html}
 </div>
 """, unsafe_allow_html=True)
@@ -956,6 +1148,9 @@ def main() -> None:
         if not controls["uploaded"]:
             st.warning("Please upload your resume PDF before running the analysis.")
         else:
+            # Always clear previous results so fresh jobs are fetched each time
+            if "result" in st.session_state:
+                del st.session_state["result"]
             result = run_analysis(controls)
             if result:
                 st.session_state["result"] = result

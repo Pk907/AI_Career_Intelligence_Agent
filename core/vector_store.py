@@ -1,12 +1,13 @@
 """
 Embedding generation + ChromaDB persistence.
 
-Embedding backend priority:
-  1. sentence-transformers/all-MiniLM-L6-v2  (best quality, needs HF access)
-  2. Local TF-IDF + TruncatedSVD             (fallback, zero network deps)
+Embedding backend:
+  Local TF-IDF + TruncatedSVD (instant startup, zero network deps).
+  sentence-transformers is intentionally disabled to avoid the 60-90s
+  cold-start delay that made the Analyze button appear frozen.
 
-Both backends produce L2-normalised 384-dim (or configurable) dense vectors
-and expose the same embed(texts) -> list[list[float]] interface.
+Both backends produce L2-normalised 384-dim dense vectors and expose
+the same embed(texts) -> list[list[float]] interface.
 """
 from __future__ import annotations
 
@@ -29,8 +30,8 @@ from core.config import (
 
 log = get_logger(__name__)
 
-EMBED_DIM = 384          # target dimensionality (matches MiniLM)
-_encoder = None          # sentence-transformers model (lazy)
+EMBED_DIM = 384          # target dimensionality
+_encoder = None          # reserved for future sentence-transformers re-enable
 _tfidf_engine = None     # TF-IDF fallback engine (lazy)
 
 
@@ -46,7 +47,6 @@ class _TFIDFEngine:
     def __init__(self, n_components: int = EMBED_DIM):
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.decomposition import TruncatedSVD
-        from sklearn.pipeline import Pipeline
         import numpy as np
 
         self.np = np
@@ -101,57 +101,30 @@ def _get_tfidf_engine() -> _TFIDFEngine:
     return _tfidf_engine
 
 
-_st_unavailable = False   # set True after first failure to skip future attempts
+# sentence-transformers is disabled to avoid 60-90s cold-start freeze.
+# Set _st_unavailable = False here to re-enable it.
+_st_unavailable = True
 
 
 def _try_sentence_transformers(texts: list[str]) -> list[list[float]] | None:
-    """Attempt sentence-transformers encode. Returns None on any failure."""
-    global _encoder, _st_unavailable
-    if _st_unavailable:
-        return None
-    try:
-        if _encoder is None:
-            import logging
-            # Suppress noisy HF/transformers download warnings
-            for noisy in ("transformers", "sentence_transformers", "huggingface_hub"):
-                logging.getLogger(noisy).setLevel(logging.ERROR)
-            from sentence_transformers import SentenceTransformer
-            _encoder = SentenceTransformer(EMBEDDING_MODEL)
-            log.info("sentence-transformers loaded: %s", EMBEDDING_MODEL)
-        vecs = _encoder.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-        return vecs.tolist()
-    except Exception as exc:
-        short = str(exc).split("\n")[0][:120]
-        log.info("sentence-transformers unavailable (%s) → TF-IDF+SVD active", short)
-        _encoder = None
-        _st_unavailable = True   # don't retry for rest of session
-        return None
+    """Disabled — always returns None to use fast TF-IDF+SVD (instant startup)."""
+    return None
 
 
 def get_embedding_backend() -> str:
     """
-    Return which embedding backend is currently active: 'sentence-transformers'
-    (real MiniLM embeddings) or 'tfidf-svd-fallback' (local, lower quality).
-    Call this AFTER at least one embed() call, since the backend is decided
-    lazily on first use.
+    Return which embedding backend is currently active.
     """
-    if _st_unavailable:
-        return "tfidf-svd-fallback"
-    if _encoder is not None:
-        return "sentence-transformers"
-    return "not-yet-determined"
+    return "tfidf-svd-local"
 
 
 def embed(texts: list[str]) -> list[list[float]]:
     """
     Embed a list of strings → L2-normalised dense vectors.
-    Tries sentence-transformers first; falls back to TF-IDF+SVD.
+    Uses TF-IDF+SVD (instant, local, no network required).
     """
     if not texts:
         return []
-    result = _try_sentence_transformers(texts)
-    if result is not None:
-        return result
     return _get_tfidf_engine().encode(texts)
 
 

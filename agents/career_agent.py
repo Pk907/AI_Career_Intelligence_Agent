@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, IO
 
 from tools.resume_tool import analyse_resume
-from tools.job_search import search_jobs
+from tools.job_search import search_jobs, NO_KEY_SENTINEL, API_ERROR_SENTINEL
 from tools.matching_tool import match_jobs, compute_aggregate_skill_gaps
 from tools.roadmap_tool import build_roadmap
 from core.rag_chain import generate_career_summary
@@ -117,12 +117,39 @@ class CareerAgent:
             active_role, active_location,
         )
 
+        job_search_backend = "unavailable"
+        jobs_raw: list[dict] = []
+        job_search_error: str = ""
+
         try:
-            jobs = search_jobs(active_role, location=active_location)
-            result["raw_jobs"] = jobs
+            jobs_raw = search_jobs(
+                active_role,
+                location=active_location,
+                candidate_skills=resume_data.get("skills", []),
+            )
+            result["raw_jobs"] = jobs_raw
+
+            # Check for sentinel (no key / API error)
+            if jobs_raw and "__status__" in jobs_raw[0]:
+                status = jobs_raw[0]["__status__"]
+                job_search_error = jobs_raw[0].get("__error__", status)
+                if status == NO_KEY_SENTINEL:
+                    job_search_backend = "no-key"
+                    log.warning("Job search: RAPIDAPI_KEY not set")
+                else:
+                    job_search_backend = "api-error"
+                    log.warning("Job search API error: %s", job_search_error)
+                jobs_raw = []   # no real jobs
+            else:
+                job_search_backend = "rapidapi-jsearch"
+
         except Exception as exc:
             errors.append(f"Job search failed: {exc}")
-            jobs = []
+            job_search_error = str(exc)
+
+        result["job_search_backend"] = job_search_backend
+        result["job_search_error"]   = job_search_error
+        jobs = jobs_raw
 
         # ── Step 3: Job Matching ──────────────────────────────────────────────
         _progress(3, "Calculating match scores…")
@@ -172,11 +199,10 @@ class CareerAgent:
         result["active_location"] = active_location
         result["role_was_auto_derived"] = role_was_auto_derived
 
-        # Transparency: expose which backends actually served this run, so
-        # the UI never implies a capability that wasn't really used.
+        # Transparency: expose which backends actually served this run
         from core.vector_store import get_embedding_backend
         result["embedding_backend"] = get_embedding_backend()
-        result["job_search_backend"] = "rapidapi-jsearch" if os.getenv("RAPIDAPI_KEY", "") else "fallback-demo-pool"
+        # job_search_backend already set above
         result["llm_backend"] = (
             "anthropic-claude-sonnet-4-6" if os.getenv("ANTHROPIC_API_KEY", "")
             else "huggingface-inference" if os.getenv("HF_TOKEN", "")
