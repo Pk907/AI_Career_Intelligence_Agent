@@ -298,11 +298,9 @@ def extract_skills(text: str) -> tuple[list[str], dict[str, list[str]]]:
 
     # Pass 1: scan for all known aliases in the full text
     for alias, canonical in _SKILL_ALIASES.items():
-        # Use word-boundary matching for short aliases to avoid false positives
-        if len(alias) <= 3:
-            pattern = r"\b" + re.escape(alias) + r"\b"
-        else:
-            pattern = re.escape(alias)
+        # Use lookbehind and lookahead to match word boundaries safely,
+        # even for skills like C++ or C# that end in non-word characters.
+        pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
         if re.search(pattern, lower):
             if canonical not in found:
                 found[canonical] = _SKILL_CATEGORIES.get(canonical, "Other")
