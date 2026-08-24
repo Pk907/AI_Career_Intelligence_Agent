@@ -6,25 +6,37 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-import html as _html
-import io
-import os
-import time
+# ── Streamlit import ──────────────────────────────────────────────────────────
+# Must come before the secrets bridge (bridge needs st.secrets) and before
+# st.set_page_config (which must be the first Streamlit call).
 import streamlit as st
 
 # ── Streamlit Cloud secrets → environment variables bridge ────────────────────
-# On Streamlit Cloud, API keys live in st.secrets (Settings → Secrets).
-# On local dev, they come from .env via python-dotenv (loaded in config.py).
-# This block copies st.secrets into os.environ BEFORE any module import reads
-# os.getenv(), so all existing os.getenv() calls work identically in both envs.
-# Local .env takes precedence: we only write keys that are not already set.
+# POSITION IS INTENTIONAL: this block runs immediately after `import streamlit`
+# and BEFORE every other import (html, io, os, time, and all core/agents/tools
+# modules).  core/config.py calls os.getenv() at import time; job_search.py
+# calls load_dotenv() at module top-level.  Both are triggered transitively when
+# `from agents.career_agent import career_agent` executes inside run_analysis().
+# By populating os.environ here — before any of those modules are touched —
+# every downstream os.getenv() call sees the Cloud secrets as if they came
+# from a real .env file.
+#
+# Local .env takes precedence: we only write keys that are NOT already set
+# (load_dotenv in config.py runs first on local dev, so .env values win).
+import os
 try:
     for _secret_key, _secret_val in st.secrets.items():
         if isinstance(_secret_val, str) and _secret_key not in os.environ:
             os.environ[_secret_key] = _secret_val
 except Exception:
-    # st.secrets is unavailable locally without a secrets.toml — safe to ignore.
+    # st.secrets raises FileNotFoundError locally when secrets.toml is absent.
+    # That is expected — python-dotenv / .env takes over in that case.
     pass
+
+# ── Remaining stdlib imports (safe to import after bridge) ────────────────────
+import html as _html
+import io
+import time
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
