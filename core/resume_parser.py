@@ -248,7 +248,7 @@ def _split_into_sections(text: str) -> dict[str, str]:
         stripped = line.strip()
         matched = False
         for section, pattern in _SECTION_PATTERNS.items():
-            if pattern.search(stripped) and len(stripped) < 60:
+            if pattern.search(stripped) and len(stripped.split()) <= 4:
                 current = section
                 matched = True
                 break
@@ -329,7 +329,7 @@ def _extract_years_of_experience(experience_text: str, full_text: str = "") -> f
     Looks for patterns like 2021-2023, Jan 2022 – Present, etc.
     Returns 0.0 for freshers (no work history found).
     """
-    search_text = experience_text or full_text
+    search_text = experience_text
     year_pattern = re.compile(r"\b(20\d{2}|19\d{2})\b")
     years_found = [int(y) for y in year_pattern.findall(search_text)]
 
