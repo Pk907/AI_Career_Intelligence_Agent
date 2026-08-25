@@ -248,7 +248,7 @@ def _split_into_sections(text: str) -> dict[str, str]:
         stripped = line.strip()
         matched = False
         for section, pattern in _SECTION_PATTERNS.items():
-            if pattern.search(stripped) and len(stripped) < 60:
+            if pattern.search(stripped) and len(stripped.split()) <= 4:
                 current = section
                 matched = True
                 break
@@ -298,11 +298,9 @@ def extract_skills(text: str) -> tuple[list[str], dict[str, list[str]]]:
 
     # Pass 1: scan for all known aliases in the full text
     for alias, canonical in _SKILL_ALIASES.items():
-        # Use word-boundary matching for short aliases to avoid false positives
-        if len(alias) <= 3:
-            pattern = r"\b" + re.escape(alias) + r"\b"
-        else:
-            pattern = re.escape(alias)
+        # Use lookbehind and lookahead to match word boundaries safely,
+        # even for skills like C++ or C# that end in non-word characters.
+        pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
         if re.search(pattern, lower):
             if canonical not in found:
                 found[canonical] = _SKILL_CATEGORIES.get(canonical, "Other")
@@ -331,7 +329,7 @@ def _extract_years_of_experience(experience_text: str, full_text: str = "") -> f
     Looks for patterns like 2021-2023, Jan 2022 – Present, etc.
     Returns 0.0 for freshers (no work history found).
     """
-    search_text = experience_text or full_text
+    search_text = experience_text
     year_pattern = re.compile(r"\b(20\d{2}|19\d{2})\b")
     years_found = [int(y) for y in year_pattern.findall(search_text)]
 
